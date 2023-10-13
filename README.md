@@ -36,6 +36,7 @@ Welcome to **Multibots**, the autonomous guide bot designed to assist shoppers i
 ```bash
 git clone https://github.com/koy1226/Multibots_project.git
 cd Multibots_project
+```
 
 ---
 
