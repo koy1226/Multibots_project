@@ -67,43 +67,45 @@ def open_realsense_capture():
 
     config_1.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
     config_1.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-
+    pipeline_1.start(config_1)
+    return pipeline_1
+'''
     pipeline_2 = rs.pipeline()
     config_2 = rs.config()
     config_2.enable_device("918512074284")
 
     config_2.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
     config_2.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+'''
 
-    pipeline_1.start(config_1)
-    pipeline_2.start(config_2)
-    return pipeline_1, pipeline_2
+    #pipeline_2.start(config_2)
+    #return pipeline_1, pipeline_2
 
 
 def realsense():
     def realsense_function():
-        pipeline_1, pipeline_2 = open_realsense_capture()
+        pipeline_1 = open_realsense_capture()
 
         while True:
             frames_1 = pipeline_1.wait_for_frames()
             color_frame_1 = frames_1.get_color_frame()
             depth_frame_1 = frames_1.get_depth_frame()
 
-            frames_2 = pipeline_2.wait_for_frames()
-            color_frame_2 = frames_2.get_color_frame()
-            depth_frame_2 = frames_2.get_depth_frame()
+            #frames_2 = pipeline_2.wait_for_frames()
+            #color_frame_2 = frames_2.get_color_frame()
+            #depth_frame_2 = frames_2.get_depth_frame()
 
-            if not frames_1 or not frames_2:
+            if not frames_1: #or not frames_2:
                 continue
 
             color_image_1 = np.asanyarray(color_frame_1.get_data())
             frame_1 = color_image_1.copy()
 
-            color_image_2 = np.asanyarray(color_frame_2.get_data())
-            frame_2 = color_image_2.copy()
+            #color_image_2 = np.asanyarray(color_frame_2.get_data())
+            #frame_2 = color_image_2.copy()
 
             with lock:
-                if frame_1 is None or frame_2 is None:
+                if frame_1 is None: #or frame_2 is None:
                     break
 
                 detections_1 = []
@@ -111,15 +113,15 @@ def realsense():
                 if os.path.isfile(customer_path):
                     box_person(frame_1, depth_frame_1, detections_1)
 
-                images = np.vstack((frame_1, frame_2))
+                #images = np.vstack((frame_1, frame_2))
 
             cv2.namedWindow("RealSense", cv2.WINDOW_AUTOSIZE)
-            cv2.imshow("RealSense", images)
+            cv2.imshow("RealSense", frame_1)
             key = cv2.waitKey(1)
             if key & 0xFF == ord("q") or key == 27:
                 cv2.destroyAllWindows()
                 pipeline_1.stop()
-                pipeline_2.stop()
+                #pipeline_2.stop()
                 break
 
     realsense_thread = threading.Thread(target=realsense_function)

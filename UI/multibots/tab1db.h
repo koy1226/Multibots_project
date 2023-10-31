@@ -2,6 +2,7 @@
 #define TAB1DB_H
 
 #include <QWidget>
+#include <QCheckBox>
 #include <QTimer>
 #include <QDebug>
 #include <QDial>
@@ -11,10 +12,6 @@
 #include <QListData>
 #include <QStringListModel>
 #include <QTextBlock>
-#include <QtSql>
-#include <QSqlDatabase>
-#include <QSqlQuery>
-#include <QSqlError>
 #include <QDateTime>
 #include <QDebug>
 
@@ -39,25 +36,10 @@ private:
     QListView listView;
     QStringList shoppinglist;
     QListData *listdata;
-    QSqlDatabase db;
-
+    QCheckBox* pCBkeys[10];
 
 private slots:
-    void connectToDatabase();
-    void on_pCBkey8_stateChanged(int arg1);
-    void on_pCBkey7_stateChanged(int arg1);
-    void on_pCBkey1_stateChanged(int arg1);
-    void on_pCBkey2_stateChanged(int arg1);
-    void on_pCBkey3_stateChanged(int arg1);
-    void on_pCBkey4_stateChanged(int arg1);
-    void on_pCBkey5_stateChanged(int arg1);
-    void on_pCBkey6_stateChanged(int arg1);
-    void on_pCBkey9_stateChanged(int arg1);
-    void on_pCBkey10_stateChanged(int arg1);
-    void on_pCBkey11_stateChanged(int arg1);
-    void on_pCBkey12_stateChanged(int arg1);
     void on_pPBClear_clicked();
-    void on_pCBkey_stateChanged(int index, int arg1);
     void on_pPBStart_clicked();
 };
 

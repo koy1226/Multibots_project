@@ -1,19 +1,8 @@
 #include "tab1db.h"
 #include "ui_tab1db.h"
-
-void Tab1DB::connectToDatabase() {
-    QSqlDatabase db = QSqlDatabase::addDatabase("QMYSQL");
-    db.setHostName("3.39.54.145");
-    db.setDatabaseName("Mart");
-    db.setUserName("root");
-    db.setPassword("971226");
-
-    if (!db.open()) {
-        qDebug() << "Database connection failed: " << db.lastError();
-    } else {
-        qDebug() << "Database connection successful!";
-    }
-}
+#include <QProcess>
+#include <QFile>
+#include <QTextStream>
 
 Tab1DB::Tab1DB(QWidget *parent) :
     QWidget(parent),
@@ -22,125 +11,44 @@ Tab1DB::Tab1DB(QWidget *parent) :
     ui->setupUi(this);
     pQTimer = new QTimer(this);
     listWidget = new QListWidget(this);
-    connect(ui->pPBappQuit,SIGNAL(clicked()), qApp, SLOT(quit()));
-    connect(ui->pCBkey1, SIGNAL(stateChanged(int)), this, SLOT(on_pCBkey_stateChanged(1, int)));
-    connect(ui->pCBkey2, SIGNAL(stateChanged(int)), this, SLOT(on_pCBkey_stateChanged(2, int)));
-    connect(ui->pCBkey3, SIGNAL(stateChanged(int)), this, SLOT(on_pCBkey_stateChanged(3, int)));
-    connect(ui->pCBkey4, SIGNAL(stateChanged(int)), this, SLOT(on_pCBkey_stateChanged(4, int)));
-    connect(ui->pCBkey5, SIGNAL(stateChanged(int)), this, SLOT(on_pCBkey_stateChanged(5, int)));
-    connect(ui->pCBkey6, SIGNAL(stateChanged(int)), this, SLOT(on_pCBkey_stateChanged(6, int)));
-    connect(ui->pCBkey7, SIGNAL(stateChanged(int)), this, SLOT(on_pCBkey_stateChanged(7, int)));
-    connect(ui->pCBkey8, SIGNAL(stateChanged(int)), this, SLOT(on_pCBkey_stateChanged(8, int)));
-    connect(ui->pCBkey9, SIGNAL(stateChanged(int)), this, SLOT(on_pCBkey_stateChanged(9, int)));
-    connect(ui->pCBkey10, SIGNAL(stateChanged(int)), this, SLOT(on_pCBkey_stateChanged(10, int)));
-    connect(ui->pCBkey11, SIGNAL(stateChanged(int)), this, SLOT(on_pCBkey_stateChanged(11, int)));
-    connect(ui->pCBkey12, SIGNAL(stateChanged(int)), this, SLOT(on_pCBkey_stateChanged(12, int)));
 
+    connect(ui->pPBappQuit, SIGNAL(clicked()), qApp, SLOT(quit()));
 
+    // 체크박스 연결을 루프를 통해 처리
+    for (int i = 1; i <= 37; ++i) {
+        QCheckBox *checkBox = this->findChild<QCheckBox *>(QString("pCBkey%1").arg(i));
+        if (checkBox) {
+            connect(checkBox, &QCheckBox::stateChanged, [=](int state){
+                QString objectName = checkBox->objectName();
+                QString keyNumber = objectName.mid(6);
+                int keyIndex = keyNumber.toInt() - 1;
 
-}
-void Tab1DB::on_pCBkey_stateChanged(int index, int arg1) {
-    QCheckBox* checkBox = nullptr;
+                QString text = checkBox->text();
 
-    // 인덱스에 따라 해당 체크 박스를 선택
-    switch (index) {
-        case 1:
-            checkBox = ui->pCBkey1;
-            break;
-        case 2:
-            checkBox = ui->pCBkey2;
-            break;
-        case 3:
-            checkBox = ui->pCBkey3;
-            break;
-        case 4:
-            checkBox = ui->pCBkey4;
-            break;
-        case 5:
-            checkBox = ui->pCBkey5;
-            break;
-        case 6:
-            checkBox = ui->pCBkey6;
-            break;
-        case 7:
-            checkBox = ui->pCBkey7;
-            break;
-        case 8:
-            checkBox = ui->pCBkey8;
-            break;
-        case 9:
-            checkBox = ui->pCBkey9;
-            break;
-        case 10:
-            checkBox = ui->pCBkey10;
-            break;
-        case 11:
-            checkBox = ui->pCBkey11;
-            break;
-        case 12:
-            checkBox = ui->pCBkey12;
-            break;
-        default:
-            break;
-    }
+                if(state == Qt::Checked) {
+                    qDebug() << QString("Key %1 is activated.").arg(keyIndex + 1);
+                    ui->textEdit->append(text);
+                    shoppinglist.append(text);
+                } else if(state == Qt::Unchecked) {
+                    qDebug() << QString("Key %1 is deactivated.").arg(keyIndex + 1);
+                    shoppinglist.removeOne(text);
 
-    if (checkBox == nullptr) {
-        return;
-    }
+                    QTextCursor cursor(ui->textEdit->document());
+                    while (!cursor.atEnd()) {
+                        cursor = ui->textEdit->document()->find(text, cursor);
 
-    QString text = checkBox->text();
-
-    if(arg1==2){
-
-        ui->textEdit->append(text);
-        shoppinglist.append(text);
-    }
-    else if(arg1==0)
-    {
-        shoppinglist.removeOne(text);
-
-        QTextCursor cursor(ui->textEdit->document());
-
-        // 텍스트를 찾아서 선택
-        while (!cursor.atEnd()) {
-            cursor = ui->textEdit->document()->find(text, cursor);
-
-            if (!cursor.isNull()) {
-                cursor.removeSelectedText();
-            } else {
-                break;
-            }
+                        if (!cursor.isNull()) {
+                            cursor.removeSelectedText();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            });
         }
     }
-}
 
-// 각 체크 박스의 stateChanged 이벤트에서 on_pCBkey_stateChanged 호출
-void Tab1DB::on_pCBkey1_stateChanged(int arg1) {
-    on_pCBkey_stateChanged(1, arg1);
-}void Tab1DB::on_pCBkey2_stateChanged(int arg1) {
-    on_pCBkey_stateChanged(2, arg1);
-}void Tab1DB::on_pCBkey3_stateChanged(int arg1) {
-    on_pCBkey_stateChanged(3, arg1);
-}void Tab1DB::on_pCBkey4_stateChanged(int arg1) {
-    on_pCBkey_stateChanged(4, arg1);
-}void Tab1DB::on_pCBkey5_stateChanged(int arg1) {
-    on_pCBkey_stateChanged(5, arg1);
-}void Tab1DB::on_pCBkey6_stateChanged(int arg1) {
-    on_pCBkey_stateChanged(6, arg1);
-}void Tab1DB::on_pCBkey7_stateChanged(int arg1) {
-    on_pCBkey_stateChanged(7, arg1);
-}void Tab1DB::on_pCBkey8_stateChanged(int arg1) {
-    on_pCBkey_stateChanged(8, arg1);
-}void Tab1DB::on_pCBkey9_stateChanged(int arg1) {
-    on_pCBkey_stateChanged(9, arg1);
-}void Tab1DB::on_pCBkey10_stateChanged(int arg1) {
-    on_pCBkey_stateChanged(10, arg1);
-}void Tab1DB::on_pCBkey11_stateChanged(int arg1) {
-    on_pCBkey_stateChanged(11, arg1);
-}void Tab1DB::on_pCBkey12_stateChanged(int arg1) {
-    on_pCBkey_stateChanged(12, arg1);
 }
-
 // 나머지 체크 박스들도 유사한 방식으로 처리
 
 void Tab1DB::on_pPBClear_clicked()
@@ -158,43 +66,65 @@ void Tab1DB::on_pPBClear_clicked()
     ui->pCBkey10->setChecked(false);
     ui->pCBkey11->setChecked(false);
     ui->pCBkey12->setChecked(false);
+    ui->pCBkey13->setChecked(false);
+    ui->pCBkey14->setChecked(false);
+    ui->pCBkey15->setChecked(false);
+    ui->pCBkey16->setChecked(false);
+    ui->pCBkey17->setChecked(false);
+    ui->pCBkey18->setChecked(false);
+    ui->pCBkey19->setChecked(false);
+    ui->pCBkey20->setChecked(false);
+    ui->pCBkey21->setChecked(false);
+    ui->pCBkey22->setChecked(false);
+    ui->pCBkey23->setChecked(false);
+    ui->pCBkey24->setChecked(false);
+    ui->pCBkey25->setChecked(false);
+    ui->pCBkey26->setChecked(false);
+    ui->pCBkey27->setChecked(false);
+    ui->pCBkey28->setChecked(false);
+    ui->pCBkey29->setChecked(false);
+    ui->pCBkey30->setChecked(false);
+    ui->pCBkey31->setChecked(false);
+    ui->pCBkey32->setChecked(false);
+    ui->pCBkey33->setChecked(false);
+    ui->pCBkey34->setChecked(false);
+    ui->pCBkey35->setChecked(false);
+    ui->pCBkey36->setChecked(false);
+    ui->pCBkey37->setChecked(false);
+
 }
 
 void Tab1DB::on_pPBStart_clicked()
 {
-    connectToDatabase();
-    // 데이터베이스 연결 확인
-    if (!db.isOpen()) {
-        qDebug() << "Database is not open. Cannot execute SQL command.";
-        return;
-    }
-
-    QSqlQuery query(db);
-
-    // 트랜잭션 시작
-    query.exec("START TRANSACTION;");
-
-    // Cart 테이블 내용 삭제
-    query.exec("SET SQL_SAFE_UPDATES = 0;");
-    query.exec("DELETE FROM Cart;");
-    query.exec("SET SQL_SAFE_UPDATES = 1;");
-
-    // shoppinglist에 있는 각 상품을 Cart 테이블에 삽입
-    for (const QString &product : shoppinglist) {
-        query.prepare("INSERT INTO Cart (product_name) VALUES (:product_name);");
-        query.bindValue(":product_name", product);
-        if (!query.exec()) {
-            qDebug() << "Failed to insert into Cart: " << query.lastError();
+    // shoppinglist 내용을 텍스트 파일로 저장
+    QFile file("/home/ubuntu/multibots/shoppinglist.txt");
+    if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QTextStream out(&file);
+        for (const QString &product : shoppinglist) {
+            out << product << "\n";
         }
+        file.close();
+        qDebug() << "File saved successfully.";
+    } else {
+        qDebug() << "Failed to open shoppinglist.txt for writing.";
+        qDebug() << "Error:" << file.errorString();
     }
 
-    // 트랜잭션 커밋
-    query.exec("COMMIT;");
+    // 파이썬 스크립트 실행
+    QProcess pythonProcess;
+    pythonProcess.setWorkingDirectory("/home/ubuntu/multibots");
+    pythonProcess.start("python3", QStringList() << "send2cart.py"); // 파이썬 스크립트 파일명을 제공하세요
+    if (pythonProcess.waitForFinished()) {
+        qDebug() << "Python script executed successfully.";QByteArray standardOutput = pythonProcess.readAllStandardOutput();
+        QByteArray standardError = pythonProcess.readAllStandardError();
+        qDebug() << "Standard Output:" << standardOutput;
+        qDebug() << "Standard Error:" << standardError;
+    } else {
+        qDebug() << "Failed to execute Python script.";
+    }
 }
 
 Tab1DB::~Tab1DB()
 {
     delete ui;
 }
-
-

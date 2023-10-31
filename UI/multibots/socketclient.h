@@ -15,7 +15,7 @@ private:
     QTcpSocket *pQTcpSocket;
     QString SERVERIP = "127.0.0.1";
     int SERVERPOT = 5000;
-    QString LOGID = "KOY_ROS";
+    QString LOGID = "Multibots";
     QString LOGPW = "PASSWD";
 public:
     SocketClient(QWidget *parent = 0, Qt::WindowFlags flags = 0);
