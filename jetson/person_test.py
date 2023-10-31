@@ -14,8 +14,6 @@ from deepsort_utils.detection import (
     compute_color_for_labels,
 )
 
-import sys
-import traceback
 
 def init():
     global model_path, re_model_path, customer_path, lock, NN_BUDGET, MAX_COSINE_DISTANCE, metric, tracker, detector, extractor, customer_image, threshold_distance, core
@@ -63,69 +61,67 @@ class Model:
 
 
 def open_realsense_capture():
-    # pipeline_1 = rs.pipeline()
-    # config_1 = rs.config()
-    # config_1.enable_device("920312070850")
+    pipeline_1 = rs.pipeline()
+    config_1 = rs.config()
+    config_1.enable_device("920312070850")
 
-    # config_1.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-    # config_1.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-
+    config_1.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+    config_1.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+    pipeline_1.start(config_1)
+    return pipeline_1
+'''
     pipeline_2 = rs.pipeline()
     config_2 = rs.config()
     config_2.enable_device("918512074284")
 
     config_2.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
     config_2.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+'''
 
-    # pipeline_1.start(config_1)
-    pipeline_2.start(config_2)
-    return pipeline_2
-    # return pipeline_1, pipeline_2
+    #pipeline_2.start(config_2)
+    #return pipeline_1, pipeline_2
 
 
 def realsense():
     def realsense_function():
-        # pipeline_1,
-        pipeline_2 = open_realsense_capture()
+        pipeline_1 = open_realsense_capture()
 
         while True:
-            # frames_1 = pipeline_1.wait_for_frames()
-            # color_frame_1 = frames_1.get_color_frame()
-            # depth_frame_1 = frames_1.get_depth_frame()
+            frames_1 = pipeline_1.wait_for_frames()
+            color_frame_1 = frames_1.get_color_frame()
+            depth_frame_1 = frames_1.get_depth_frame()
 
-            frames_2 = pipeline_2.wait_for_frames()
-            color_frame_2 = frames_2.get_color_frame()
-            depth_frame_2 = frames_2.get_depth_frame()
+            #frames_2 = pipeline_2.wait_for_frames()
+            #color_frame_2 = frames_2.get_color_frame()
+            #depth_frame_2 = frames_2.get_depth_frame()
 
-            # if not frames_1 or not frames_2:
-            if not frames_2:
+            if not frames_1: #or not frames_2:
                 continue
 
-            # color_image_1 = np.asanyarray(color_frame_1.get_data())
-            # frame_1 = color_image_1.copy()
+            color_image_1 = np.asanyarray(color_frame_1.get_data())
+            frame_1 = color_image_1.copy()
 
-            color_image_2 = np.asanyarray(color_frame_2.get_data())
-            frame_2 = color_image_2.copy()
+            #color_image_2 = np.asanyarray(color_frame_2.get_data())
+            #frame_2 = color_image_2.copy()
 
             with lock:
-                # if frame_1 is None or frame_2 is None:
-                if frame_2 is None:
+                if frame_1 is None: #or frame_2 is None:
                     break
 
                 detections_1 = []
 
                 if os.path.isfile(customer_path):
-                    box_person(frame_2, depth_frame_2, detections_1)
+                    box_person(frame_1, depth_frame_1, detections_1)
 
-                # images = np.vstack((frame_1, frame_2))
+                #images = np.vstack((frame_1, frame_2))
 
             cv2.namedWindow("RealSense", cv2.WINDOW_AUTOSIZE)
-            cv2.imshow("RealSense", frame_2)
+            cv2.imshow("RealSense", frame_1)
             key = cv2.waitKey(1)
             if key & 0xFF == ord("q") or key == 27:
                 cv2.destroyAllWindows()
-                # pipeline_1.stop()
-                pipeline_2.stop()
+                pipeline_1.stop()
+                #pipeline_2.stop()
                 break
 
     realsense_thread = threading.Thread(target=realsense_function)
@@ -296,12 +292,4 @@ def box_person(frame, depth_frame, detections):
 
 if __name__ == "__main__":
     init()
-    log_file = open("error_log.txt", "w")
-    sys.stderr = log_file
-    try:
-        realsense()
-    except Exception as e:
-        # Log the exception and its stack trace
-        traceback.print_exc()
-    finally:
-        log_file.close()
+    realsense()
