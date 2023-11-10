@@ -2,10 +2,10 @@ import mysql.connector
 
 # MySQL에 연결
 db_connection = mysql.connector.connect(
-    host="3.39.54.145",
-    user="root",
-    password="971226",
-    database="3.39.54.145"
+    host="DB_IP",
+    user="USER",
+    password="PW",
+    database="DB_NAME"
 )
 
 # 커서 생성
