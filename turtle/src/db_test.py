@@ -1,7 +1,7 @@
 import mysql.connector
 
 # MySQL 서버에 연결
-conn = mysql.connector.connect(user='root', password='971226', host='3.39.54.145', database='Mart')
+conn = mysql.connector.connect(user='USER', password='PW', host='DB_IP', database='DB_NAME')
 cursor = conn.cursor()
 
 # 좌표를 불러오는 SQL 쿼리 실행
