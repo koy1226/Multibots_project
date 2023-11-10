@@ -2,10 +2,10 @@ import mysql.connector
 
 # 데이터베이스 연결 정보 설정
 db_config = {
-    "host": "3.39.54.145",
-    "user": "root",
-    "password": "971226",
-    "database": "Mart"
+    "host": "DB_IP",
+    "user": "USER",
+    "password": "PW",
+    "database": "DB_NAME"
 }
 
 try:
