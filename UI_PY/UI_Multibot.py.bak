@@ -1,0 +1,1327 @@
+import datetime
+import os
+import sys
+import threading
+import time
+import numpy as np
+import serial.tools.list_ports
+import qdarkstyle                                                       # pip install qdarkstyle, if you want to use modern style.. please find moder...
+
+from PyQt5.QtWidgets import *
+#from PyQt5.QtWidgets import QApplication, QMainWindow, QMessageBox, QInputDialog
+from PyQt5.QtCore import *
+#from PyQt5.QtCore import pyqtSignal, Qt, QObject
+from PyQt5.QtGui import *
+from PyQt5 import uic
+from UI_Fac_RATEL import Ui_MainWindow
+from typing import Final
+from SerialManager import SerialManager
+from RATEL_Protocol import RATEL_Protocol
+from datetime import datetime, timedelta
+
+import pandas as pd
+
+# Signal to update GUI after reading date from barcode scanner aynchronously
+class SerialBarScanRxCallback(QObject):
+    serialRxSignal = pyqtSignal()
+    
+    def run(self):
+        self.serialRxSignal.emit()
+
+# Signal to update buttons by connection state of COM port
+class RefreshButtonGui(QObject):
+    refreshButton = pyqtSignal()
+    
+    def run(self):
+        self.refreshButton.emit()
+
+# Signal to update buttons for barcode scanner by connection state of COM port  
+class RefreshBarScanButtonGui(QObject):
+    refreshButton = pyqtSignal()
+    
+    def run(self):
+        self.refreshButton.emit()
+        
+
+# Signal to run Factory test
+class RunFacTestSig(QObject):
+    runFacTestSignal = pyqtSignal()
+    
+    def run(self):
+        self.runFacTestSignal.emit()
+
+
+####################################################################
+### Main Window Class ##############################################
+####################################################################
+class MyWindow(QMainWindow) :
+    def __init__(self, parent = None):
+        ########## Initialize Functions ##########
+        super().__init__(parent)        
+        
+        self._gui = Ui_MainWindow()
+        self._gui.setupUi(self)
+        # GUI Init
+        self.setWindowTitle("RATEL_Factory_Util v0.0.6")
+        # self._serial = serial.Serial()
+        # self._serial = SerialManager()
+
+        self._gui.chkboxList = []
+        rowNum = self._gui.tableWidget_TestItem.rowCount()
+        for i in range(rowNum):
+            chkbox = QCheckBox(" ") # 체크 박스 옆부분을 클릭해도 체크/해제할 수 있도록 공백 추가
+            chkbox.setChecked(True)
+            self._gui.chkboxList.append(chkbox)
+
+            self._gui.tableWidget_TestItem.setCellWidget(i, 0, self._gui.chkboxList[i])
+
+        # 해상도에 따라 크기 변경되지 않도록 하기 위해 창 크기를 고정.
+        self.setFixedSize(1050, 800)
+        self._gui.tableWidget_TestItem.resizeColumnsToContents()
+        self._gui.tableWidget_TestItem.resizeRowsToContents()
+        
+        self.serialBarScanRxkWork = SerialBarScanRxCallback()   
+        self.serialBarScanRxkWork.serialRxSignal.connect(self.serialBarScanRxCallback)
+
+        self.RefreshButtonGui = RefreshButtonGui()
+        self.RefreshButtonGui.refreshButton.connect(self.updateButtonState)
+        
+        self.RefreshBarScanButtonGui = RefreshBarScanButtonGui()
+        self.RefreshBarScanButtonGui.refreshButton.connect(self.updateBarScanButtonState)
+
+        self.runFac = RunFacTestSig()
+        self.runFac.runFacTestSignal.connect(self.runFacTest)
+
+        self._isConnected = False                                       # Serial port 연결 여부        
+        self.Ratel = RATEL_Protocol()                                   # Protocol class instance
+        self._isBarScanConnected = False
+        
+        self.CONNECT:Final = "Connect"
+        self.DISCONNECT:Final = "Disconnect"
+        self.baudrate:Final = 19200
+
+        self.packetData = []                                            ### packet data 저장용 list               
+        self.recvPacketData = []                                        ### packet data 저장용 list
+        self._readByteBarScan = []
+        # self._gui.lineEdit_cmd.returnPressed.connect(self.sendMsg)      ### Line Edit 에서 enter key 누르면 sendMsg() 호출
+        
+        # self._gui.lineEdit_cmd.setFocus()                               ### lineedit 로 set focus
+        
+        self._gui.textEdit_receive.setTabStopWidth(20)                  ### Tab size 조정
+
+        self.strSN = ""                                                 ### serial number 받기 
+        self.inputStr = ""                                              ### input dialog text
+        self.TC_COLM_POS_CHKBOX = 0
+        self.TC_COLM_POS_TCNAME = 1
+        self.TC_COLM_POS_SPECMIN = 2
+        self.TC_COLM_POS_SPECMAX = 3
+        self.TC_COLM_POS_RESULT = 4
+        self.TC_COLM_POS_REALSPEC = 5
+        
+        self.TC_RESULT_COLOR_FAIL = 0   # fail
+        self.TC_RESULT_COLOR_PASS = 1   # pass
+        
+        self._FacTestBusy = False
+        self._FacTestStep = 250
+        self._FacTestFileUpdate = False
+        self._FacTestThreadStop = False
+        self._FacTestStopbyErr = False
+        self.subStep = 0
+        self._ResultColor = self.TC_RESULT_COLOR_FAIL
+        self._resultstate = True
+        # FresultStr = self.Ratel.ResultStr
+        # reseltStr = ""
+
+        self.FACCMD_RESULT_FAIL = 0
+        self.FACCMD_RESULT_PASS = 1
+        self.FACCMD_RESULT_STR = 2
+        self.FACCMD_RESULT_BUSY = 3
+        
+        self.FACTEST_KEY = 0
+        self.FACTEST_NORFLASH = 1
+        self.FACTEST_BAT_VOL = 2
+        self.FACTEST_TEMP = 3
+        self.FACTEST_RTC = 4
+        self.FACTEST_BUZZER = 5
+        self.FACTEST_VIBRATOR = 6
+        self.FACTEST_LED = 7
+        self.FACTEST_GREENLIGHT = 8
+        self.FACTEST_SENSOR_AMP = 9
+        self.FACTEST_BLE_test = 10
+        self.FACTEST_WRITE_SN = 11
+        self.FACTEST_READ_SN = 12
+        self.FACTEST_FACTORYMODE_ON = 13
+        self.FACTEST_FACTORYMODE_OFF = 14
+        self.FACTEST_LCD = 15
+        self.FACTEST_BACKLIGHT = 16
+        self.FACTEST_HIGH_ALARM = 17
+        self.FACTEST_STOP_ALARM = 18
+        self.FACTEST_BLE_POWER = 19
+        self.FACTEST_WRITE_HW = 20
+        self.FACTEST_READ_HW = 21
+
+        self._FacCmdParam = 0
+        self.FACTEST_BAT_VOL_MAX = 3500
+        self.FACTEST_TEMP_MAX = 230
+        
+        self.FACTEST_LED1 = 0
+        self.FACTEST_LED2 = 1
+        self.FACTEST_LED3 = 2
+        self.FACTEST_LED4 = 3
+        self.FACTEST_OPLED = 4
+        self.FACTEST_LED_OFF = 5
+
+        self.FACTEST_VIBRATOR_OFF = 0
+        self.FACTEST_VIBRATOR_ON = 1
+        self.FACTEST_BUZZER_OFF = 0
+        self.FACTEST_BUZZER_ON = 1
+        
+        self._FacCmdResult = self.FACCMD_RESULT_BUSY
+        self._FacCmdResultStr = ""
+        self._FacCmdResultValue = 0
+
+        self._sen = False
+        self._presen = False
+
+        curPath = os.getcwd()
+        resultPath = curPath + "\\TestResult" 
+        try:
+            if not os.path.exists(resultPath):
+                os.makedirs(resultPath)
+        except:
+            print("creating test result folder error")
+        self._testResultPath = resultPath
+
+        self._FacTestThread = threading.Thread(target=self.runFacTestTrigger)
+        self._FacTestThread.start()
+        self._FacStart = True
+        self.refreshCOM()                                               ### COM port refresh
+        self.updateButtonState()
+        
+        # self.connectCOM()                                     # 시작하자마자 COM port 연결
+
+    ########## Override functions ##########    
+    # def keyPressEvent(self, event):                                     # Override KeyPressEvent : 어느 키를 누르던 lineEdit_cmd 에 focus 가 가도록 함
+    #     self._gui.lineEdit_cmd.setFocus()
+    
+    def closeEvent(self, event):                                        # Override for 'X' button operation, 여기에서 serial port를 닫아줘야 함. 안그러면 꺼지지 않음
+        self._isConnected = False        
+        try:
+            self.serial_manager.stop()
+        except:
+            print("serial close exception")
+        else:
+            print("serial closed")
+            
+        try:
+            self._FacTestThreadStop = True
+            self._FacTestThread.close()
+            self._FacTestThread.join()
+        except:
+            print("pcb test serial close exception")
+        else:
+            print("pcb test serial closed")
+
+        self._isBarScanConnected = False    
+        try:
+            self._serialBarScann.close()
+            self.serialBarScanRxThread.join()
+        except:
+            print("barcode thread close exception")
+        else:
+            print("barcode thread closed")
+            
+        event.accept()
+
+    #####################################################################
+    ### Button Functions ################################################
+    #####################################################################    
+    def refreshCOM(self):                                               # TAB 'Console' : 'refresh' button operation                   
+        self._gui.comboBox_port.clear()
+        self._gui.comboBox_BarScanPort.clear()
+        ports = serial.tools.list_ports.comports()
+        for p in ports:
+            self._gui.comboBox_port.addItem(p.device)    
+            self._gui.comboBox_BarScanPort.addItem(p.device)    
+        self._gui.comboBox_port.setCurrentIndex(0)                       # 첫번째 port number 를 default 로 설정        
+        self._gui.comboBox_BarScanPort.setCurrentIndex(0)                       # 세번쨰 port number 를 default 로 설정        
+    
+    def connectCOM(self):                                               # TAB 'Console' : 'connect' button operation                   
+        if self._isConnected:
+            self._isConnected = False
+            self.serial_manager.stop()
+
+        else:                                                           # Connecting~
+            self.portNum = self._gui.comboBox_port.currentText()
+                                        
+            try:                             
+                self.serial_manager = SerialManager(self.portNum, self.baudrate)     # serial manager class instance
+                self.serial_manager.register_read_call_back(self.uartRxCallback)
+                print("serial_manager.register_read_call_back done")
+                self.serial_manager.start()
+                self._isConnected = True
+
+                msg = "Connected to port Number: " + self.portNum
+                print(msg)
+                self._gui.textEdit_receive.append(msg)
+                
+            except Exception as e:
+                QMessageBox.warning(self, "Wrong port number", "Please select right port number")
+                print("Exception: ", e)
+
+        self.updateButtonState()
+
+    def connectBarcodeScanner(self):
+        if self._isBarScanConnected:
+            self._isBarScanConnected = False
+            self._serialBarScann.close()
+            self.serialBarScanRxThread.join()
+        else:
+            portNum = self._gui.comboBox_BarScanPort.currentText()
+            try:
+                self._serialBarScann = serial.Serial(portNum, 9600)
+            except:
+                QMessageBox.warning(self, "Wrong port number", "Please select right port number")
+            else:
+                self._isBarScanConnected = True
+
+                self.serialBarScanRxThread = threading.Thread(target=self.readSerialBarScan)
+                self.serialBarScanRxThread.start()
+                msg = "Connected to port Number: " + portNum
+                print(msg)
+                self._gui.textEdit_receive.append(msg)
+        
+        self.updateBarScanButtonState()
+
+
+    def startAllTest(self):
+        text = self._gui.textEdit_SN.toPlainText()
+        if text == "" and " ": 
+            QMessageBox.warning(self, "Wrong serial number", "Please input serial number")
+            self._FacTestStep = 250
+        else:
+            rowNum = self._gui.tableWidget_TestItem.rowCount()
+            for i in range(rowNum):
+            # clear result
+                tbl_item = self._gui.tableWidget_TestItem.item(i, self.TC_COLM_POS_RESULT) 
+                if tbl_item:
+                    tbl_item.setText(" ")
+                else: 
+                    self._gui.tableWidget_TestItem.setItem(i, self.TC_COLM_POS_RESULT, QTableWidgetItem(" "))
+                tbl_item_real = self._gui.tableWidget_TestItem.item(i, self.TC_COLM_POS_REALSPEC) 
+                if tbl_item_real:
+                    tbl_item_real.setText(" ")
+                else: 
+                    self._gui.tableWidget_TestItem.setItem(i, self.TC_COLM_POS_REALSPEC, QTableWidgetItem(" "))
+                # set tbl_item again because prev. tbl_item may be null
+                tbl_item = self._gui.tableWidget_TestItem.item(i, self.TC_COLM_POS_RESULT)
+                tbl_item.setBackground(QBrush(Qt.black))
+
+            self.subStep = 0 
+            self.waitCount = 0
+            self._FacTestStopbyErr = False
+            self._FacTestStep = 0   # set 0 to start Factory test
+            # self._gui.pushButton_start.toggle()
+            # self._FacStart = self._gui.pushButton_start.toggled()
+            msg = "Start"
+            print(msg)
+            self._gui.textEdit_receive.append(msg)
+            self.updateButtonState()
+            
+        
+    def stopAllTest(self):
+        self._FacTestStep = 250
+        self.subStep = 0 
+        self.waitCount = 0
+        # self._gui.pushButton_stop.toggle()
+        # self._FacTestThread._stop()
+        # self._FacTestThread.join()
+        msg = "Stop"
+        print(msg)
+        self._gui.textEdit_receive.append(msg)
+        self._FacStart = True
+        self.updateButtonState()
+
+    def runFacTestTrigger(self):
+        while True:
+            if (False == self._FacTestBusy):
+                self.runFac.run()
+
+            time.sleep(0.1)     # 100ms period
+            
+            if self._FacTestThreadStop == True:
+                return
+
+    def runFacTest(self):
+        self._FacTestBusy = True
+        updateResultGui = False
+        resultStr = " "
+        self.Ratel.ResultStr = ""
+        
+        rowNum = self._gui.tableWidget_TestItem.rowCount()
+        if self._FacTestStep < rowNum:
+            chkRun = self._gui.chkboxList[self._FacTestStep].isChecked()
+            if False == chkRun:
+                resultStr = "Skip"
+                tbl_item = self._gui.tableWidget_TestItem.item(self._FacTestStep, self.TC_COLM_POS_RESULT)
+                if tbl_item:
+                    tbl_item.setText(resultStr)
+                else:
+                    self._gui.tableWidget_TestItem.setItem(self._FacTestStep, self.TC_COLM_POS_RESULT, QTableWidgetItem(resultStr))
+
+                self._FacTestStep += 1
+                self._FacTestBusy = False
+                return
+        else:
+            self._FacTestBusy = False
+            return
+
+       
+        if self._FacTestStep == 0:
+            if self.subStep == 0: # Step 1. Enter factory Mode
+                self.subStep = 1
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_FACTORYMODE_ON ,self._FacCmdParam)
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        resultStr = "Pass"
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+
+                    updateResultGui = True
+                    self.subStep = 0
+                    self._FacTestStep += 1
+
+        if self._FacTestStep == 1:    
+            if self.subStep == 0: # Step 1. Check external NOR flash
+                self.subStep = 1
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_NORFLASH,self._FacCmdParam)
+                
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        resultStr = "Pass"
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+
+                    updateResultGui = True
+                    self.subStep = 0
+                    self._FacTestStep += 1                          
+       
+        elif self._FacTestStep == 2:
+            if self.subStep == 0:   # Step 3. Check Date and Time (RTC)
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_RTC, self._FacCmdParam)
+                self.subStep = 1
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        resultStr = "Pass"
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                    updateResultGui = True
+                    self.subStep = 0
+                    self._FacTestStep += 1            
+
+
+        # Step 4. Check temperature       조건문 수정필요
+        elif self._FacTestStep == 3:
+            if self.subStep == 0:
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_TEMP,self._FacCmdParam)
+                self.subStep = 1       
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    tbl_item_max = self._gui.tableWidget_TestItem.item(self._FacTestStep, self.TC_COLM_POS_SPECMAX).text().strip()
+                    tbl_item_min = self._gui.tableWidget_TestItem.item(self._FacTestStep, self.TC_COLM_POS_SPECMIN).text().strip()
+                    if tbl_item_min and tbl_item_max : 
+                        if float(tbl_item_max) > float(self.Ratel.Temp) and float(self.Ratel.Temp) > float(tbl_item_min):
+                            resultStr = "Pass"
+                        else:
+                            resultStr = "Fail"
+                            self._resultstate = False
+                        updateResultGui = True
+                        self.subStep = 0
+                        self._FacTestStep += 1
+
+                    else:
+                        QMessageBox.warning(self, "warning", "Please input your spec")
+
+        
+        elif self._FacTestStep == 4:
+            if self.subStep == 0:   # Step 5. Key input
+                self.waitCount = 0
+                self.subStep = 1
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                QMessageBox.information(self, "Manual Test", "Please press key within 5 seconds after clicking OK button")
+                self.sendCmd(self.FACTEST_KEY,self._FacCmdParam)
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        resultStr = "Pass"
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+
+                    updateResultGui = True
+                    self.subStep = 0
+                    self._FacTestStep += 1             
+
+        elif self._FacTestStep == 5:
+            if self.subStep == 0:    # Step 6. Check LCD           
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_LCD,0) # 0 : LCD on
+                self.btn_reply = QMessageBox.information(self, "Select", "All LCD segments On?", QMessageBox.Yes, QMessageBox.No)
+                self.subStep = 1
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                        self.sendCmd(self.FACTEST_LCD,1) # 1 : LCD off
+                        self.subStep = 2
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                        updateResultGui = True
+                        self.subStep = 0
+                        self._FacTestStep += 1
+            elif self.subStep == 2:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        self.subStep = 3
+            elif self.subStep == 3:
+                if self.btn_reply == QMessageBox.Yes:
+                    resultStr = "Pass"
+                else:
+                    resultStr = "Fail"
+                    self._resultstate = False
+                updateResultGui = True
+                self.subStep = 0
+                self._FacTestStep += 1
+       
+        elif self._FacTestStep == 6:
+            if self.subStep == 0: # Step 7. Check backlight 
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_BACKLIGHT, 1) # 1 on
+                self.subStep = 1
+                self.btn_reply = QMessageBox.information(self, "Select", "backlight On?", QMessageBox.Yes, QMessageBox.No)    
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                        self.sendCmd(self.FACTEST_BACKLIGHT, 0) # 0 off
+                        self.subStep = 2
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                        updateResultGui = True
+                        self.subStep = 0
+                        self._FacTestStep += 1
+            elif self.subStep ==2:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        if self.btn_reply == QMessageBox.Yes:
+                            resultStr = "Pass"
+                        else:
+                            resultStr = "Fail"
+                            self._resultstate = False
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                    updateResultGui = True
+                    self.subStep = 0
+                    self._FacTestStep += 1  
+
+        # Step 8. Check led 1 on 
+        elif self._FacTestStep == 7:
+            if self.subStep == 0:
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_LED,self.FACTEST_LED1)
+                self.subStep = 1       
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        self.btn_reply = QMessageBox.information(self, "Select", "LED 1 On?", QMessageBox.Yes, QMessageBox.No)
+                        self.sendCmd(self.FACTEST_LED,self.FACTEST_LED_OFF)
+                        self.subStep = 2
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                        updateResultGui = True
+                        self.subStep = 0
+                        self._FacTestStep += 1
+
+            elif self.subStep == 2:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.btn_reply == QMessageBox.Yes:
+                        resultStr = "Pass"
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                    # self.sendCmd(self.FACTEST_LED, self.FACTEST_LED_OFF)                    
+                    updateResultGui = True
+                    self.subStep = 0
+                    self._FacTestStep += 1
+
+        # Step 9. Check led 2 on 
+        elif self._FacTestStep == 8:
+            if self.subStep == 0:
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_LED,self.FACTEST_LED2)
+                self.subStep = 1       
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        self.btn_reply = QMessageBox.information(self, "Select", "LED 2 On?", QMessageBox.Yes, QMessageBox.No)
+                        self.sendCmd(self.FACTEST_LED,self.FACTEST_LED_OFF)
+                        self.subStep = 2
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                        updateResultGui = True
+                        self.subStep = 0
+                        self._FacTestStep += 1
+
+            elif self.subStep == 2:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.btn_reply == QMessageBox.Yes:
+                        resultStr = "Pass"
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                    updateResultGui = True
+                    self.subStep = 0
+                    self._FacTestStep += 1
+
+        # Step 10. Check led 3 on 
+        elif self._FacTestStep == 9:
+            if self.subStep == 0:
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_LED,self.FACTEST_LED3)
+                self.subStep = 1       
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        self.btn_reply = QMessageBox.information(self, "Select", "LED 3 On?", QMessageBox.Yes, QMessageBox.No)
+                        self.sendCmd(self.FACTEST_LED,self.FACTEST_LED_OFF)
+                        self.subStep = 2
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                        updateResultGui = True
+                        self.subStep = 0
+                        self._FacTestStep += 1
+
+            elif self.subStep == 2:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.btn_reply == QMessageBox.Yes:
+                        resultStr = "Pass"
+                            #self._ResultColor = self.TC_RESULT_COLOR_PASS
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+
+                    # self.sendCmd(self.FACTEST_LED, self.FACTEST_LED_OFF)                    
+                    updateResultGui = True
+                    self.subStep = 0
+                    self._FacTestStep += 1 
+
+        # Step 11. Check led 4 on 
+        elif self._FacTestStep == 10:
+            if self.subStep == 0:
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_LED,self.FACTEST_LED4)
+                self.subStep = 1       
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        self.btn_reply = QMessageBox.information(self, "Select", "LED 4 On?", QMessageBox.Yes, QMessageBox.No)
+                        self.sendCmd(self.FACTEST_LED,self.FACTEST_LED_OFF)
+                        self.subStep = 2
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                        updateResultGui = True
+                        self.subStep = 0
+                        self._FacTestStep += 1
+
+            elif self.subStep == 2:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.btn_reply == QMessageBox.Yes:
+                        resultStr = "Pass"
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+
+                    updateResultGui = True
+                    self.subStep = 0
+                    self._FacTestStep += 1
+            
+        # Step 12. Check greenlight led on 
+        elif self._FacTestStep == 11:
+            if self.subStep == 0:
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_GREENLIGHT,self.FACTEST_OPLED)
+                self.subStep = 1
+                
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        self.btn_reply = QMessageBox.information(self, "Select", "GreenLight On?", QMessageBox.Yes, QMessageBox.No)
+                        self.sendCmd(self.FACTEST_GREENLIGHT,self.FACTEST_LED_OFF)
+                        self.subStep = 2
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                        updateResultGui = True
+                        self.subStep = 0
+                        self._FacTestStep += 1
+                    
+            elif self.subStep == 2:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.btn_reply == QMessageBox.Yes:
+                        resultStr = "Pass"
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                    
+                    updateResultGui = True
+                    self.subStep = 0
+                    self._FacTestStep += 1
+       
+        elif self._FacTestStep == 12:
+            if self.subStep == 0: # Step 13. Check Buzzer 
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_BUZZER, self.FACTEST_BUZZER_ON)
+                self.subStep = 1
+                self.btn_reply = QMessageBox.information(self, "Select", "Buzzer On?", QMessageBox.Yes, QMessageBox.No)
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                        self.sendCmd(self.FACTEST_BUZZER, self.FACTEST_BUZZER_OFF)
+                        self.subStep = 2
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                        updateResultGui = True
+                        self.subStep = 0
+                        self._FacTestStep += 1
+            elif self.subStep == 2:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.btn_reply == QMessageBox.Yes:
+                        resultStr = "Pass"
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                    updateResultGui = True
+                    self.subStep = 0
+                    self._FacTestStep += 1               
+
+        elif self._FacTestStep == 13:
+            if self.subStep == 0:   #Step 14 Current consumption : normal(ble x )
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_BLE_POWER, 1) # 1 off
+                self.inputStr,self.Ok = QInputDialog.getText(self,'input current', 'Enter current consumption:')
+                self.subStep = 1 
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:   
+                        self._gui.textEdit_receive.append("Ble off")
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                        updateResultGui = True
+                        self.subStep = 0
+                        self._FacTestStep += 1                                                      
+                    self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                    self.sendCmd(self.FACTEST_BLE_POWER, 0) # 0 on      
+                    self.subStep = 2        
+            elif self.subStep == 2:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        tbl_item_max = self._gui.tableWidget_TestItem.item(self._FacTestStep, self.TC_COLM_POS_SPECMAX).text().strip()
+                        tbl_item_min = self._gui.tableWidget_TestItem.item(self._FacTestStep, self.TC_COLM_POS_SPECMIN).text().strip()                        
+                        msg = "Ble on"
+                        print(msg)
+                        self._gui.textEdit_receive.append(msg) 
+                        if self.Ok:
+                            if self.inputStr == '':
+                                self.inputStr = '0'           
+                            if float(tbl_item_max) > float(self.inputStr) and float(self.inputStr) > float(tbl_item_min):
+                                resultStr = "Pass"
+                            else:
+                                resultStr = "Fail"
+                                self._resultstate = False
+                        else:
+                            resultStr = "Fail"           
+                            self._resultstate = False                  
+                    else:
+                        resultStr = "Fail"     
+                        self._resultstate = False
+                    updateResultGui = True 
+                    self.subStep = 0
+                    self._FacTestStep += 1
+        
+        elif self._FacTestStep == 14:
+            if self.subStep == 0:   # Step 15. Current consumption : ble on  수정필요
+                self.inputStr,self.Ok = QInputDialog.getText(self,'input current', 'Enter current consumption:')
+                self.subStep = 1 
+            elif self.subStep == 1:              
+                if self.Ok:
+                    tbl_item_max = self._gui.tableWidget_TestItem.item(self._FacTestStep, self.TC_COLM_POS_SPECMAX).text().strip()
+                    tbl_item_min = self._gui.tableWidget_TestItem.item(self._FacTestStep, self.TC_COLM_POS_SPECMIN).text().strip() 
+                    if self.inputStr == '':
+                        self.inputStr = '0'                     
+                    if float(tbl_item_max) > float(self.inputStr) and float(self.inputStr) > float(tbl_item_min):
+                        resultStr = "Pass"
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                else:
+                    resultStr = "Fail"
+                    self._resultstate = False
+                updateResultGui = True
+                self.subStep = 0
+                self._FacTestStep += 1   
+
+        elif self._FacTestStep == 15:
+            if self.subStep == 0:   # Step 16. Current consumption : high  수정필요
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_HIGH_ALARM, 2) # 2 : on
+                self.subStep = 1 
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult: 
+                        self.inputStr,self.Ok = QInputDialog.getText(self,'input current', 'Enter current consumption:')                  
+                        self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                        self.sendCmd(self.FACTEST_HIGH_ALARM, 0) # 0 : off 
+                        self.subStep = 2 
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                        updateResultGui = True
+                        self.subStep = 0
+                        self._FacTestStep += 1
+            elif self.subStep == 2:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult: 
+                        if self.Ok:
+                            tbl_item_max = self._gui.tableWidget_TestItem.item(self._FacTestStep, self.TC_COLM_POS_SPECMAX).text().strip()
+                            tbl_item_min = self._gui.tableWidget_TestItem.item(self._FacTestStep, self.TC_COLM_POS_SPECMIN).text().strip() 
+                            if self.inputStr == '':
+                                self.inputStr ='0'  
+                            if float(tbl_item_max) > float(self.inputStr) and float(self.inputStr) > float(tbl_item_min):
+                                resultStr = "Pass"
+                            else:
+                                resultStr = "Fail"
+                                self._resultstate = False
+                        else:
+                            resultStr = "Fail"
+                            self._resultstate = False
+                    else:
+                        resultStr = "Fail"           
+                        self._resultstate = False                 
+
+                    updateResultGui = True
+                    self.subStep = 0
+                    self._FacTestStep += 1
+                    # self.inputStr ="" 
+
+        elif self._FacTestStep == 16:
+            if self.subStep == 0:   # Step 17. Check ble test 
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self._FacCmdParam = 0
+                self.sendCmd(self.FACTEST_BLE_test, self._FacCmdParam)
+                self.subStep = 1 
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        resultStr = "Pass"
+                            #self._ResultColor = self.TC_RESULT_COLOR_PASS
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+
+                    updateResultGui = True 
+                    self.subStep = 0
+                    self._FacTestStep += 1   
+
+        elif self._FacTestStep == 17:       # Step 18. Write SN
+            text =  self._gui.textEdit_SN.toPlainText()
+            if text == '': 
+                QMessageBox.warning(self, "Wrong serial number", "Please input serial number")
+                resultStr = "Fail"
+                self._resultstate = False
+                updateResultGui = True
+                self.subStep = 0
+                self._FacTestStep += 1
+            else:
+                if self.subStep == 0:   
+                    self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                    self.sendCmd(self.FACTEST_WRITE_SN, self._FacCmdParam)
+                    self.subStep = 1 
+                elif self.subStep == 1:
+                    if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                        if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                            resultStr = "Pass"
+                        else:
+                            resultStr = "Fail"
+                            self._resultstate = False
+                        updateResultGui = True 
+                        self.subStep = 0
+                        self._FacTestStep += 1       
+
+        elif self._FacTestStep == 18:       
+            if self.subStep == 0:       # Step 19. Read SN 
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_READ_SN, self._FacCmdParam)
+                self.subStep = 1 
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        resultStr = "Pass"
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                    updateResultGui = True 
+                    self.subStep = 0
+                    self._FacTestStep += 1       
+
+        elif self._FacTestStep == 19:    
+            if self.subStep == 0:       # Step 20. Write HW
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_WRITE_HW, self._FacCmdParam)
+                self.subStep = 1 
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        resultStr = "Pass"
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                    updateResultGui = True 
+                    self.subStep = 0
+                    self._FacTestStep += 1      
+
+        elif self._FacTestStep == 20:                                           
+            if self.subStep == 0:       # Step 21. Read HW
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_READ_HW, self._FacCmdParam)
+                self.subStep = 1 
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        resultStr = "Pass"
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                    updateResultGui = True 
+                    self.subStep = 0
+                    self._FacTestStep += 1   
+
+        elif self._FacTestStep == 21:    
+            if self.subStep == 0: # Step 22. exit factory Mode
+                self.subStep = 1
+                self.Ratel._FacCmdResult = self.FACCMD_RESULT_BUSY
+                self.sendCmd(self.FACTEST_FACTORYMODE_OFF ,self._FacCmdParam)
+            elif self.subStep == 1:
+                if self.FACCMD_RESULT_BUSY > self.Ratel._FacCmdResult:
+                    if self.FACCMD_RESULT_PASS == self.Ratel._FacCmdResult:
+                        resultStr = "Pass"
+                        #self._ResultColor = self.TC_RESULT_COLOR_PASS
+                    else:
+                        resultStr = "Fail"
+                        self._resultstate = False
+                        #self._ResultColor = self.TC_RESULT_COLOR_FAIL
+
+                    updateResultGui = True
+                    self.subStep = 0
+                    self._FacTestStep += 1    
+
+        elif self._FacTestStep == 22:
+            curDateTime = datetime.now()        # Step 23. save the result
+            dateStr = curDateTime.strftime("%Y-%m-%d")
+            dateTimeStr = curDateTime.strftime("%Y-%m-%d %H:%M:%S")
+            
+            #curPath = os.getcwd();
+            resultFileName = self._testResultPath + "\\" + dateStr + "_PCB_Test_Results.csv"
+
+            # if there is fail result, Do not save the result
+            if self._resultstate :
+                # if there is no test result file, make file and insert the name of test cases
+                if not os.path.exists(resultFileName):
+                    rowNum = self._gui.tableWidget_TestItem.rowCount()
+                    lastNum = rowNum - 1
+                    fileResult_desc = open(resultFileName, "w")
+                    for i in range(rowNum):
+                        tbl_item = self._gui.tableWidget_TestItem.item(i, self.TC_COLM_POS_TCNAME)
+                        if tbl_item:
+                            testCaseName = tbl_item.text()
+                        else:
+                            testCaseName = "None"
+                        
+                        if i == 0:
+                            testCaseName = "SN,DateTIme," + testCaseName
+                        else:
+                            testCaseName = "," + testCaseName
+                            
+                        fileResult_desc.write(testCaseName)
+                    
+                    fileResult_desc.write("\n")
+                    fileResult_desc.close()
+                
+
+                # 테스트 결과를 저장, 파일명은 날짜, SN과 테스트 날짜/시간 다음에 테스트 결과들 저장
+                fileResult_desc = open(resultFileName, "a")
+                # strSN = self._gui.textEdit_SN.toPlainText()
+                tbl_strSN = self._gui.tableWidget_TestItem.item(18, self.TC_COLM_POS_REALSPEC)  # read SN 의 출력값을 읽어와서 엑셀파일에 저장 
+                if tbl_strSN:
+                    strSN = tbl_strSN.text()
+                else:
+                    strSN = "None"            
+                testResultStr = strSN + "," + dateTimeStr
+                fileResult_desc.write(testResultStr)
+                rowNum = self._gui.tableWidget_TestItem.rowCount()
+                lastNum = rowNum - 1
+                for i in range(rowNum):
+                    if i == lastNum:
+                        testResultStr = "Pass" 
+                    else:
+                        tbl_item = self._gui.tableWidget_TestItem.item(i, self.TC_COLM_POS_RESULT)
+                        if tbl_item:
+                            testResultStr = tbl_item.text()
+                        else:
+                            testResultStr = "None"
+                        
+                    testResultStr = "," + testResultStr
+                    fileResult_desc.write(testResultStr)
+                    
+                fileResult_desc.write("\n")
+                fileResult_desc.close()
+                resultStr = "Pass"  
+                updateResultGui = True
+                self.subStep = 0
+                self._FacTestStep += 1 
+                self._gui.textEdit_receive.append("-----------Finish-----------")
+            else:
+                resultStr = "Fail"  
+                self._resultstate = False
+                updateResultGui = True
+                self.subStep = 0
+                self._FacTestStep += 1 
+                self._gui.textEdit_receive.append("Failed to save the result ")
+
+        if True == updateResultGui:
+            result_row = self._FacTestStep - 1
+            # if result_row == 13 or 14 or 15 : # current consumption : normal
+            tbl_item = self._gui.tableWidget_TestItem.item(result_row, self.TC_COLM_POS_REALSPEC)
+            if tbl_item:
+                tbl_item.setText(self.inputStr)
+            else:
+                self._gui.tableWidget_TestItem.setItem(result_row, self.TC_COLM_POS_REALSPEC, QTableWidgetItem(self.inputStr))
+            self.inputStr = ""
+            
+            if result_row == 3 : # Temperature
+                tbl_item = self._gui.tableWidget_TestItem.item(result_row, self.TC_COLM_POS_REALSPEC)
+                if tbl_item:
+                    tbl_item.setText(str(self.Ratel.Temp))
+                else:
+                    self._gui.tableWidget_TestItem.setItem(result_row, self.TC_COLM_POS_REALSPEC, QTableWidgetItem(str(self.Ratel.Temp)))
+
+            elif result_row == 17: # Write SN 
+                tbl_item = self._gui.tableWidget_TestItem.item(result_row, self.TC_COLM_POS_REALSPEC)
+                if tbl_item:
+                    tbl_item.setText(self._gui.textEdit_SN.toPlainText())
+                else:
+                    self._gui.tableWidget_TestItem.setItem(result_row, self.TC_COLM_POS_REALSPEC, QTableWidgetItem(self._gui.textEdit_SN.toPlainText()))
+                self._gui.textEdit_SN.setText("")
+                # temp ="  "
+                # self._gui.tableWidget_TestItem.item(result_row, self.TC_COLM_POS_SPECMAX).setText(temp)
+            elif result_row == 18: # Read SN
+                tbl_item = self._gui.tableWidget_TestItem.item(result_row, self.TC_COLM_POS_REALSPEC)
+                if tbl_item:
+                    tbl_item.setText(self.Ratel._FacCmdResultStr)
+                else:
+                    self._gui.tableWidget_TestItem.setItem(result_row, self.TC_COLM_POS_REALSPEC, QTableWidgetItem(self.Ratel._FacCmdResultStr))
+            elif result_row == 19: # Write HW
+                tbl_item = self._gui.tableWidget_TestItem.item(result_row, self.TC_COLM_POS_REALSPEC)
+                if tbl_item:
+                    tbl_item.setText(self._gui.textEdit_PCB.toPlainText() + "." + self._gui.textEdit_LCD.toPlainText())
+                else:
+                    self._gui.tableWidget_TestItem.setItem(result_row, self.TC_COLM_POS_REALSPEC, QTableWidgetItem(self._gui.textEdit_PCB.toPlainText() + "." + self._gui.textEdit_LCD.toPlainText()))
+            elif result_row == 20: # Read HW
+                tbl_item = self._gui.tableWidget_TestItem.item(result_row, self.TC_COLM_POS_REALSPEC)
+                if tbl_item:
+                    tbl_item.setText(str(self.Ratel.hwver_temp1) + "." + str(self.Ratel.hwver_temp2))
+                else:
+                    self._gui.tableWidget_TestItem.setItem(result_row, self.TC_COLM_POS_REALSPEC, QTableWidgetItem(str(self.Ratel.hwver_temp1) + "." + str(self.Ratel.hwver_temp2)))                            
+            # set tbl_item again because prev. tbl_item may be null
+            tbl_item = self._gui.tableWidget_TestItem.item(result_row, self.TC_COLM_POS_RESULT)
+            #if self._ResultColor == self.TC_RESULT_COLOR_FAIL:
+            if resultStr == "Fail":
+                tbl_item.setText(resultStr)
+                tbl_item.setBackground(QBrush(Qt.red))
+            #elif self._ResultColor == self.TC_RESULT_COLOR_PASS:
+            elif resultStr == "Pass":
+                tbl_item.setText(resultStr)
+                tbl_item.setBackground(QBrush(Qt.green))
+                
+            if self._FacTestStopbyErr == True:
+                self._FacTestStep = 250     # stop test
+                self._FacTestStopbyErr = False 
+    
+        # set false to run next step
+        self._FacTestBusy = False            
+
+    def sendCmd(self,cmdNum,param):
+        if cmdNum == 0:
+            cmd = self.Ratel.keyInput()
+        elif cmdNum == 1:
+            cmd = self.Ratel.extflashTest()
+        elif cmdNum == 2:
+            cmd = self.Ratel.getbatteryVoltage()
+        elif cmdNum == 3:
+            cmd = self.Ratel.getTemperature() 
+        elif cmdNum == 4:
+            cmd = self.Ratel.getTime()  
+        elif cmdNum == 5:
+            cmd = self.Ratel.buzzerTest(param)      
+        elif cmdNum == 6:
+            cmd = self.Ratel.vibratorTest(param) 
+        elif cmdNum == 7:
+            cmd = self.Ratel.ledTest(param)             
+        elif cmdNum == 8:
+            cmd = self.Ratel.greenlightTest(param)          
+        elif cmdNum == 9:
+            cmd = self.Ratel.sensoramplifierTest()     
+        elif cmdNum == 10:
+            cmd = self.Ratel.BleTest() 
+        elif cmdNum == 11:
+            self.strSN = self._gui.textEdit_SN.toPlainText()
+            cmd = self.Ratel.writeSN(self.strSN)
+            # cmd = self.Ratel.lowAlarmTest()      
+        elif cmdNum == 12:
+            cmd = self.Ratel.ReadSN()
+            # cmd = self.Ratel.stopAlarm() 
+        elif cmdNum == 13:
+            cmd = self.Ratel.switchOn() 
+        elif cmdNum == 14:
+            cmd = self.Ratel.switchOff()
+        elif cmdNum == 15:
+            cmd = self.Ratel.lcdOn(param)  
+        elif cmdNum == 16:
+            cmd = self.Ratel.backlightOn(param)    
+        elif cmdNum == 17:
+            cmd = self.Ratel.highAlarmTest(param)    
+        elif cmdNum == 18:
+            cmd = self.Ratel.stopAlarm()                                                                    
+        elif cmdNum == 19:
+            cmd = self.Ratel.BlePower(param)
+        elif cmdNum == 20:
+            self.LCD = self._gui.textEdit_LCD.toPlainText()
+            if self.LCD == '0':
+                param = 0
+            else : 
+                param = 1
+            cmd = self.Ratel.WriteHW(param)
+        elif cmdNum == 21:
+            cmd = self.Ratel.ReadHW()                        
+        else:
+            print(cmdNum, "Wrong cmd number")
+
+        self.serial_manager.writeByte(cmd)
+
+    def setHWVersion(self):
+        self.LCD = self._gui.textEdit_LCD.toPlainText()
+        tbl_item = self._gui.tableWidget_TestItem.item(19, self.TC_COLM_POS_SPECMAX)
+        if tbl_item:
+            tbl_item.setText(self._gui.textEdit_PCB.toPlainText() + "." + self._gui.textEdit_LCD.toPlainText())
+        else:
+            self._gui.tableWidget_TestItem.setItem(19, self.TC_COLM_POS_SPECMAX, QTableWidgetItem(self._gui.textEdit_PCB.toPlainText() + "." + self._gui.textEdit_LCD.toPlainText()))        
+
+    #-------------------------------------------------------------------------------------
+    #-------------------------------------------------------------------------------------
+    #       Serial and BLE command handle
+    #-------------------------------------------------------------------------------------
+    #-------------------------------------------------------------------------------------
+    def readSerialBarScan(self):
+        while True:
+            try:
+                if self._isBarScanConnected:
+                    if self._serialBarScann.readable():
+                        #res = self._serialBarScann.readline()
+                        
+                        res = self._serialBarScann.read()
+                        print(res)
+                        self._readByteBarScan.append(res)
+                        if res == b'\r':
+                            self.serialBarScanRxkWork.run()
+
+
+                else:
+                    print("Exit barcode scanner read serial")
+                    self._isBarScanConnected = False
+                    self._serialBarScann.close()
+                    self.RefreshBarScanButtonGui.run()
+                    break
+            except:
+                print("Exit read barcode scanner serial by error")
+                self._isBarScanConnected = False
+                self._serialBarScann.close()
+                self.RefreshBarScanButtonGui.run()
+                break
+            
+            time.sleep(1/1000) 
+
+    #####################################################################
+    ### GUI related functions   #########################################
+    #####################################################################
+    def uartRxCallback(self, data):        
+        rxlen = len(data)
+        for i in range(rxlen):
+            if rxlen == 1:
+                res = data
+            else:
+                temp_val = data[i]
+                res = temp_val.to_bytes(1, self.Ratel.ENDIAN)
+ 
+            if self._dataRxStart == False:
+                if res == self.Ratel.SOF:
+                    self._dataRxStart = True
+                    self._readTempBytes = []
+                    self._readTempBytes.append(res)
+                    self._dataRxCount = 1
+                    self._payload_length = self.Ratel.MAX_PAYLOAD_LEN
+                   
+            else:
+                self._dataRxCount += 1
+                self._readTempBytes.append(res)
+                # 11 = SOF + Dest + Src + Sequence number + Class ID + Function ID + Payload Length + CRC + EOF
+                rxDoneCnt = 11 + self._payload_length
+               
+                if rxDoneCnt > self._dataRxCount:
+                    if self._dataRxCount == 8:
+                        # update payload length
+                        lengthBytes = self._readTempBytes[6:8]
+                        indexbytes = b''.join(lengthBytes)
+ 
+                        self._payload_length = int.from_bytes(indexbytes, byteorder=self.Ratel.ENDIAN)
+                        if self.Ratel.MAX_PAYLOAD_LEN < self._payload_length:  
+                            #self.RxTimeout.cancel()
+                            self._dataRxStart == False
+                            print("invalid Rx payload length")
+ 
+                elif rxDoneCnt == self._dataRxCount:   # response done
+                    #self.RxTimeout.cancel()
+                    self._dataRxStart = False
+                    self.recvPacketData = self._readTempBytes
+                    # check CRC of received packet
+                    try:
+                        readOffset = rxDoneCnt - 3
+                        tempBytes = self.recvPacketData[1:readOffset]
+                        input_bytes = b''.join(tempBytes)
+                        calc_crc16 = self.Ratel.calculate_crc16(input_bytes)
+                       
+                        readOffset = rxDoneCnt - 3
+                        indexbytes = self.recvPacketData[readOffset]
+                        readOffset = rxDoneCnt - 2
+                        indexbytes += self.recvPacketData[readOffset]
+                        read_crc16 = int.from_bytes(indexbytes, byteorder=self.Ratel.ENDIAN)
+                       
+                        if read_crc16 == calc_crc16:
+                            #print("valid Rx packet")
+                            self.Ratel.parsePacket(self.recvPacketData)
+                            self.recvPacketData.clear()  
+                        else:
+                            self._dataRxStart = False
+                            print("invalid packet - CRC error")
+                   
+                    except:
+                        self._dataRxStart = False
+                        print("data rx error")
+
+    def serialBarScanRxCallback(self):
+        sn_length = 11
+        sn_str = ""
+        tmp_bytes = []
+        for i in range(sn_length):
+            tmp_bytes.append(self._readByteBarScan[i])
+            
+        tmpBytesJoined = b''.join(tmp_bytes)
+        try:
+            sn_str = tmpBytesJoined.decode()
+        except:
+            sn_str = ""
+        else:
+            self._gui.textEdit_SN.setText(sn_str)
+
+        self._readByteBarScan = []
+    
+    def on_insertPlainText(self, text):                        
+        text = text.replace("\r", "")
+        self._gui.textEdit_receive.insertPlainText(text)        
+        scrollbar = self._gui.textEdit_receive.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def clear(self):
+        self._gui.textEdit_receive.clear()
+
+    def updateButtonState(self):
+        if self._isConnected:
+            self._gui.pushButton_connect.setText(self.DISCONNECT)
+            self._gui.comboBox_port.setEnabled(False)
+            self._gui.pushButton_refresh.setEnabled(False) 
+            self._gui.pushButton_start.setEnabled(True)                      
+            self._gui.pushButton_stop.setEnabled(True)                      
+        else:
+            self._gui.pushButton_connect.setText(self.CONNECT)
+            self._gui.comboBox_port.setEnabled(True)
+            self._gui.pushButton_refresh.setEnabled(True)
+            self._gui.pushButton_start.setDisabled(True)  
+            self._gui.pushButton_stop.setDisabled(True)  
+        # if self._FacTestBusy == True: 
+        #     self._gui.pushButton_start.setEnabled(False)                      
+        #     self._gui.pushButton_stop.setEnabled(True) 
+        # else:
+        #     self._gui.pushButton_start.setEnabled(True)  
+        #     self._gui.pushButton_stop.setEnabled(False)                     
+
+    def updateBarScanButtonState(self):
+        if self._isBarScanConnected:
+            self._gui.btn_BarScannerConnect.setText(self.DISCONNECT)
+            self._gui.comboBox_BarScanPort.setEnabled(False)
+            
+        else:
+            self._gui.btn_BarScannerConnect.setText(self.CONNECT)
+            self._gui.comboBox_BarScanPort.setDisabled(False)
+
+    # def resizeEvent(self, event):
+    #     # 창의 크기가 변경될 때 위젯의 크기를 조절합니다.
+    #     new_width = event.size().width()
+    #     new_height = event.size().height()
+        # self._gui.tableWidget_TestItem.resize(new_width, new_height)
+        # self._gui.groupBox_2.resize(new_width, new_height)
+        # self._gui.groupBox_top.resize(new_width, new_height)
+        # self._gui.groupBox.resize(new_width, new_height)
+        #         # 창 크기의 2/3로 설정
+        # self._gui.tabWidget.resize(new_width * 2 // 3, new_height * 2 // 3)
+        
+        # # 창 크기의 1/3로 설정
+        # self._gui.tabWidget.move(new_width // 6, new_height // 6)
+    
+####################################################################
+### Main Function should be located in bottom of the code ##########
+####################################################################
+if __name__ == "__main__":
+    os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
+    app = QApplication(sys.argv)    
+    mw = MyWindow()    
+    app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
+    mw.show()
+    app.exec_()

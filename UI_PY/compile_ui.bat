@@ -1,0 +1,1 @@
+pyuic5 -x .\UI_Multibot.ui -o .\UI_Multibot.py
